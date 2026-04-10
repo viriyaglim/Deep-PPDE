@@ -6,8 +6,8 @@ import os
 import matplotlib.pyplot as plt
 
 from lib.bsde import PPDE_BlackScholes as PPDE
-from lib.options import Lookback 
-    
+from lib.options import BarrierOption
+
 
 def sample_x0(batch_size, dim, device, s0):
     return s0 * torch.ones(batch_size, dim, device=device)
@@ -35,7 +35,11 @@ def train(T,
           device,
           method,
           s0,
-          lookback_type,
+          K,
+          B,
+          option_type,
+          barrier_direction,
+          knock,
           seed):
 
     if n_steps % lag != 0:
@@ -47,7 +51,14 @@ def train(T,
     logfile = os.path.join(base_dir, "log.txt")
     ts = torch.linspace(0, T, n_steps + 1, device=device)
 
-    lookback = Lookback(lookback_type=lookback_type, asset_idx=0)
+    barrier = BarrierOption(
+        K=K,
+        B=B,
+        option_type=option_type,
+        barrier_direction=barrier_direction,
+        knock=knock,
+        asset_idx=0
+    )
 
     ppde = PPDE(d, mu, sigma, depth, rnn_hidden, ffn_hidden).to(device)
     optimizer = torch.optim.RMSprop(ppde.parameters(), lr=0.0005)
@@ -61,9 +72,9 @@ def train(T,
         x0 = sample_x0(batch_size, d, device, s0)
 
         if method == "bsde":
-            loss, _, _ = ppde.fbsdeint(ts=ts, x0=x0, option=lookback, lag=lag)
+            loss, _, _ = ppde.fbsdeint(ts=ts, x0=x0, option=barrier, lag=lag)
         else:
-            loss, _, _ = ppde.conditional_expectation(ts=ts, x0=x0, option=lookback, lag=lag)
+            loss, _, _ = ppde.conditional_expectation(ts=ts, x0=x0, option=barrier, lag=lag)
 
         loss.backward()
         optimizer.step()
@@ -73,7 +84,7 @@ def train(T,
         if (idx + 1) % 10 == 0:
             with torch.no_grad():
                 x0 = sample_x0(5000, d, device, s0)
-                loss_eval, Y, payoff = ppde.fbsdeint(ts=ts, x0=x0, option=lookback, lag=lag)
+                loss_eval, Y, payoff = ppde.fbsdeint(ts=ts, x0=x0, option=barrier, lag=lag)
                 payoff = torch.exp(-mu * ts[-1]) * payoff.mean()
 
             pbar.update(10)
@@ -105,7 +116,7 @@ def train(T,
                 ts=ts,
                 x=x[:, :(idx * lag) + 1, :],
                 lag=lag,
-                option=lookback,
+                option=barrier,
                 mc_samples=10000
             )
         )
@@ -118,7 +129,9 @@ def train(T,
     ax.plot(ts[::lag].cpu().numpy(), mc_pred, '-', label="MC")
     ax.set_ylabel(r"$v(t, X_t)$")
     ax.legend()
-    fig.savefig(os.path.join(base_dir, f"BS_lookback_{lookback_type}_LSTM_sol.pdf"))
+
+    option_name = f"{barrier_direction}_and_{knock}_{option_type}"
+    fig.savefig(os.path.join(base_dir, f"{option_name}_LSTM_sol.pdf"))
     print("THE END")
 
 
@@ -141,8 +154,13 @@ if __name__ == "__main__":
     parser.add_argument('--lag', default=10, type=int, help="evaluation lag")
     parser.add_argument('--mu', default=0.05, type=float, help="risk-free rate")
     parser.add_argument('--sigma', default=0.2, type=float, help="volatility")
+
     parser.add_argument('--s0', default=100.0, type=float)
-    parser.add_argument('--lookback_type', default='put', choices=['put', 'call'])
+    parser.add_argument('--K', default=100.0, type=float)
+    parser.add_argument('--B', default=90.0, type=float)
+    parser.add_argument('--option_type', default='call', choices=['call', 'put'])
+    parser.add_argument('--barrier_direction', default='down', choices=['down', 'up'])
+    parser.add_argument('--knock', default='out', choices=['in', 'out'])
     parser.add_argument('--method', default="bsde", type=str, choices=["bsde", "orthogonal"])
 
     args = parser.parse_args()
@@ -152,7 +170,8 @@ if __name__ == "__main__":
     else:
         device = "cpu"
 
-    results_path = os.path.join(args.base_dir, "BS_lookback", args.lookback_type, args.method)
+    option_name = f"{args.barrier_direction}_and_{args.knock}_{args.option_type}"
+    results_path = os.path.join(args.base_dir, "BS_barrier", option_name, args.method)
     if not os.path.exists(results_path):
         os.makedirs(results_path)
 
@@ -172,6 +191,10 @@ if __name__ == "__main__":
         device=device,
         method=args.method,
         s0=args.s0,
-        lookback_type=args.lookback_type,
+        K=args.K,
+        B=args.B,
+        option_type=args.option_type,
+        barrier_direction=args.barrier_direction,
+        knock=args.knock,
         seed=args.seed
     )

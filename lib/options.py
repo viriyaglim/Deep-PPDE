@@ -12,30 +12,130 @@ class BaseOption:
         ...
 
 
-
 class Lookback(BaseOption):
-    
-    def __init__(self, idx_traded: List[int]=None):
-        self.idx_traded = idx_traded # indices of traded assets. If None, then all assets are traded
-    
+    def __init__(self, lookback_type: str = "put", asset_idx: int = 0):
+        """
+        lookback_type:
+            - 'put'  -> payoff = M_T - S_T
+            - 'call' -> payoff = S_T - m_T
+        """
+        self.lookback_type = lookback_type
+        self.asset_idx = asset_idx
+
     def payoff(self, x):
         """
-        Parameters
-        ----------
-        x: torch.Tensor
-            Path history. Tensor of shape (batch_size, N, d) where N is path length
-        Returns
-        -------
-        payoff: torch.Tensor
-            lookback option payoff. Tensor of shape (batch_size,1)
+        x: torch.Tensor of shape (batch_size, N, d)
+        returns: torch.Tensor of shape (batch_size, 1)
+        """
+        s = x[:, :, self.asset_idx]   # single asset path, shape (batch_size, N)
+        terminal = s[:, -1]
+
+        if self.lookback_type == "put":
+            running_max = torch.max(s, dim=1)[0]
+            payoff = running_max - terminal
+        elif self.lookback_type == "call":
+            running_min = torch.min(s, dim=1)[0]
+            payoff = terminal - running_min
+        else:
+            raise ValueError("lookback_type must be 'put' or 'call'")
+
+        return payoff.unsqueeze(1)
+
+class LookbackPut(BaseOption):
+    def __init__(self, asset_idx: int = 0):
+        self.asset_idx = asset_idx
+
+    def payoff(self, x):
+        s = x[:, :, self.asset_idx]              # (batch_size, N)
+        running_max = torch.max(s, dim=1)[0]    # M_T
+        terminal = s[:, -1]                     # S_T
+        payoff = running_max - terminal         # M_T - S_T
+        return payoff.unsqueeze(1)
+
+
+class LookbackCall(BaseOption):
+    def __init__(self, asset_idx: int = 0):
+        self.asset_idx = asset_idx
+
+    def payoff(self, x):
+        s = x[:, :, self.asset_idx]             # (batch_size, N)
+        running_min = torch.min(s, dim=1)[0]    # m_T
+        terminal = s[:, -1]                     # S_T
+        payoff = terminal - running_min         # S_T - m_T
+        return payoff.unsqueeze(1)
+
+class BarrierOption(BaseOption):
+    def __init__(self, K, B, option_type="call", barrier_direction="down", knock="out", asset_idx=0):
+        self.K = K
+        self.B = B
+        self.option_type = option_type      # "call" or "put"
+        self.barrier_direction = barrier_direction  # "down" or "up"
+        self.knock = knock                  # "in" or "out"
+        self.asset_idx = asset_idx
+
+    def payoff(self, x):
+        """
+        x: tensor of shape (batch_size, N, d)
+        returns: tensor of shape (batch_size, 1)
+        """
+        s = x[:, :, self.asset_idx]              # (batch_size, N)
+        terminal = s[:, -1]
+
+        if self.option_type == "call":
+            vanilla = torch.clamp(terminal - self.K, min=0.0)
+        elif self.option_type == "put":
+            vanilla = torch.clamp(self.K - terminal, min=0.0)
+        else:
+            raise ValueError("option_type must be 'call' or 'put'")
+
+        running_min = torch.min(s, dim=1)[0]
+        running_max = torch.max(s, dim=1)[0]
+
+        if self.barrier_direction == "down":
+            hit = (running_min <= self.B).float()
+            not_hit = (running_min > self.B).float()
+        elif self.barrier_direction == "up":
+            hit = (running_max >= self.B).float()
+            not_hit = (running_max < self.B).float()
+        else:
+            raise ValueError("barrier_direction must be 'down' or 'up'")
+
+        if self.knock == "in":
+            indicator = hit
+        elif self.knock == "out":
+            indicator = not_hit
+        else:
+            raise ValueError("knock must be 'in' or 'out'")
+
+        payoff = vanilla * indicator
+        return payoff.unsqueeze(1)
+    
+class DownAndOutCall(BaseOption):
+
+    def __init__(self, K, B, idx_traded: List[int] = None):
+        self.K = K
+        self.B = B
+        self.idx_traded = idx_traded
+
+    def payoff(self, x):
+        """
+        x: torch.Tensor of shape (batch_size, N, d)
+        returns: torch.Tensor of shape (batch_size, 1)
         """
         if self.idx_traded:
-            basket = torch.sum(x[..., self.idx_traded],2) # (batch_size, N)
+            basket = torch.sum(x[..., self.idx_traded], 2)
         else:
-            basket = torch.sum(x,2) # (batch_size, N)
-        payoff = torch.max(basket, 1)[0]-basket[:,-1] # (batch_size)
-        return payoff.unsqueeze(1) # (batch_size, 1)
+            basket = torch.sum(x, 2)
 
+        terminal = basket[:, -1]
+        running_min = torch.min(basket, dim=1)[0]
+
+        vanilla_call = torch.clamp(terminal - self.K, min=0.0)
+        alive = (running_min > self.B).float()
+
+        payoff = vanilla_call * alive
+        return payoff.unsqueeze(1)
+    
 
 class Autocallable(BaseOption):
     
